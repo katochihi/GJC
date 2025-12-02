@@ -610,7 +610,7 @@ const RecruitmentBoardView = ({ currentUser, posts, onAddPost, onJoinPost, onDel
                       <div className="flex items-center gap-3 mb-2">
                         <Badge color="bg-lime-400/10 text-lime-400 border border-lime-400/20">{post.mode}</Badge>
                         <span className="text-slate-500 text-xs font-bold flex items-center gap-1"><Clock size={12} /> {post.timestamp}</span>
-                        {post.mic === 'required' && <span className="text-xs text-slate-400 flex items-center gap-1 bg-slate-800 px-2 py-0.5 rounded"><Mic size={10} /> VC必須</span>}
+                       {//} {post.mic === 'required' && <span className="text-xs text-slate-400 flex items-center gap-1 bg-slate-800 px-2 py-0.5 rounded"><Mic size={10} /> VC必須</span>}
                       </div>
                       <h3 className="text-lg font-bold text-white mb-2 line-clamp-1">"{post.comment}"</h3>
                       <div className="flex flex-wrap gap-2 mt-3">
