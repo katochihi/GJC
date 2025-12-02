@@ -42,7 +42,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { db, storage } from './firebase'; // 作成したfirebase.jsを読み込み
 import { 
   collection, addDoc, deleteDoc, doc, updateDoc, 
-  onSnapshot, query, orderBy, arrayUnion 
+  onSnapshot, query, orderBy, arrayUnion ,getDoc, setDoc
 } from 'firebase/firestore';
 import { ref, uploadString, getDownloadURL } from 'firebase/storage';
 // ▲▲▲ ここまで追加 ▲▲▲
@@ -999,10 +999,11 @@ export default function App() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
 
-  // ユーザープロフィール（本来は認証機能と紐づけますが、今回は簡易的にローカルステートで管理）
+  // --- 1. ユーザープロフィールのDB化 (LocalStorage + Firestore) ---
+  const [userId, setUserId] = useState(null); // ブラウザごとのID
   const [userProfile, setUserProfile] = useState({
-    name: "PlayerOne",
-    rank: "レジェンド",
+    name: "Guest",
+    rank: "ルーキー",
     avatar: null,
     gameName: "",
     parallelName: "",
@@ -1010,69 +1011,133 @@ export default function App() {
     twitterName: ""
   });
 
-  const handleUpdateProfile = (newProfile) => {
-    setUserProfile(newProfile);
-    setIsProfileModalOpen(false);
+  // 初期化：ID生成とプロフィールの取得
+  useEffect(() => {
+    const initUser = async () => {
+      // 1. ブラウザに保存されたIDがあるか確認
+      let currentId = localStorage.getItem('gjc_user_id');
+      
+      // なければ新規IDを作成して保存
+      if (!currentId) {
+        currentId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        localStorage.setItem('gjc_user_id', currentId);
+      }
+      setUserId(currentId);
+
+      // 2. FirestoreからそのIDのプロフィールを取得
+      const userDocRef = doc(db, "users", currentId);
+      const userSnap = await getDoc(userDocRef);
+
+      if (userSnap.exists()) {
+        // データがあればセット
+        setUserProfile(userSnap.data());
+      } else {
+        // データがなければ初期データを作成して保存
+        const initialProfile = {
+          name: "Player_" + currentId.substr(-4),
+          rank: "ルーキー",
+          avatar: null,
+          createdAt: new Date()
+        };
+        await setDoc(userDocRef, initialProfile);
+        setUserProfile(initialProfile);
+      }
+    };
+
+    initUser();
+  }, []);
+
+  // プロフィール更新処理 (画像アップロード対応)
+  const handleUpdateProfile = async (newProfile) => {
+    if (!userId) return;
+
+    try {
+      let avatarUrl = newProfile.avatar;
+
+      // 画像が変更されている場合（Base64形式なら）、Storageにアップロード
+      if (newProfile.avatar && newProfile.avatar.startsWith('data:image')) {
+        const imageRef = ref(storage, `avatars/${userId}_${Date.now()}`);
+        await uploadString(imageRef, newProfile.avatar, 'data_url');
+        avatarUrl = await getDownloadURL(imageRef);
+      }
+
+      const updatedData = {
+        ...newProfile,
+        avatar: avatarUrl // URLに置き換え
+      };
+
+      // Firestoreに保存
+      const userDocRef = doc(db, "users", userId);
+      await updateDoc(userDocRef, updatedData);
+
+      // 画面の表示も更新
+      setUserProfile(updatedData);
+      setIsProfileModalOpen(false);
+      alert("プロフィールを更新しました！");
+
+    } catch (e) {
+      console.error("Profile update failed: ", e);
+      alert("更新に失敗しました");
+    }
   };
 
-  // --- Firebase データのリアルタイム取得 ---
+
+  // --- 2. その他のデータ (募集・スクリムなど) の取得 ---
   
   const [recruitmentPosts, setRecruitmentPosts] = useState([]);
   const [scrimPosts, setScrimPosts] = useState([]);
   const [events, setEvents] = useState([]);
   const [loadouts, setLoadouts] = useState([]);
 
-  // 1. 募集リスト取得
+  // 募集リスト
   useEffect(() => {
     const q = query(collection(db, "recruitments"), orderBy("createdAt", "desc"));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    return onSnapshot(q, (snapshot) => {
       setRecruitmentPosts(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     });
-    return () => unsubscribe();
   }, []);
 
-  // 2. スクリムリスト取得
+  // スクリムリスト
   useEffect(() => {
     const q = query(collection(db, "scrims"), orderBy("createdAt", "desc"));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    return onSnapshot(q, (snapshot) => {
       setScrimPosts(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     });
-    return () => unsubscribe();
   }, []);
 
-  // 3. イベントリスト取得
+  // イベントリスト
   useEffect(() => {
     const q = query(collection(db, "events"), orderBy("createdAt", "desc"));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    return onSnapshot(q, (snapshot) => {
       setEvents(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     });
-    return () => unsubscribe();
   }, []);
 
-  // 4. ロードアウト取得
+  // ロードアウト
   useEffect(() => {
     const q = query(collection(db, "loadouts"), orderBy("createdAt", "desc"));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    return onSnapshot(q, (snapshot) => {
       setLoadouts(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     });
-    return () => unsubscribe();
   }, []);
 
 
-  // --- アクションハンドラ (Firebase書き込み) ---
+  // --- 3. アクションハンドラ ---
 
   // メンバー募集 追加
   const addPost = async (newPost) => {
     try {
-      // idはFirestoreが自動生成するので除外、日付をサーバー用に整形
-      const { id, ...postData } = newPost; 
+      const { id, ...postData } = newPost;
       await addDoc(collection(db, "recruitments"), {
         ...postData,
+        host: userProfile.name, // 投稿者名を現在のプロフィールで上書き
+        hostId: userId, // ユーザーIDも記録しておくと後で便利
+        hostAvatar: userProfile.avatar, // アイコンも記録
         createdAt: new Date(),
-        timestamp: new Date().toLocaleString('ja-JP', { hour: '2-digit', minute: '2-digit' }) // 表示用時刻
+        timestamp: new Date().toLocaleString('ja-JP', { hour: '2-digit', minute: '2-digit' })
       });
     } catch (e) {
-      console.error("Error adding post: ", e);
+      console.error(e);
       alert("投稿に失敗しました");
     }
   };
@@ -1082,9 +1147,7 @@ export default function App() {
     if(!window.confirm("本当に削除しますか？")) return;
     try {
       await deleteDoc(doc(db, "recruitments", id));
-    } catch (e) {
-      console.error("Error deleting post: ", e);
-    }
+    } catch (e) { console.error(e); }
   };
 
   // メンバー募集 参加
@@ -1092,13 +1155,10 @@ export default function App() {
     try {
       const postRef = doc(db, "recruitments", id);
       await updateDoc(postRef, {
-        joined: true, // 簡易的なフラグ（本来はユーザーIDで管理推奨）
-        applicants: arrayUnion(userProfile)
+        applicants: arrayUnion(userProfile) // 最新のプロフィール情報で参加
       });
       alert("参加リクエストを送信しました！");
-    } catch (e) {
-      console.error("Error joining post: ", e);
-    }
+    } catch (e) { console.error(e); }
   };
 
   // スクリム 追加
@@ -1107,21 +1167,17 @@ export default function App() {
       const { id, ...scrimData } = newScrim;
       await addDoc(collection(db, "scrims"), {
         ...scrimData,
+        host: userProfile.name,
+        hostId: userId,
         createdAt: new Date()
       });
-    } catch (e) {
-      console.error("Error adding scrim: ", e);
-    }
+    } catch (e) { console.error(e); }
   };
 
   // スクリム 削除
   const deleteScrim = async (id) => {
     if(!window.confirm("本当に削除しますか？")) return;
-    try {
-      await deleteDoc(doc(db, "scrims", id));
-    } catch (e) {
-      console.error("Error deleting scrim: ", e);
-    }
+    try { await deleteDoc(doc(db, "scrims", id)); } catch (e) { console.error(e); }
   };
 
   // スクリム 応募
@@ -1133,9 +1189,7 @@ export default function App() {
         applicants: arrayUnion(userProfile)
       });
       alert("対戦申し込みを送信しました！");
-    } catch (e) {
-      console.error("Error applying scrim: ", e);
-    }
+    } catch (e) { console.error(e); }
   };
 
   // イベント 追加
@@ -1144,43 +1198,34 @@ export default function App() {
       const { id, ...eventData } = newEvent;
       await addDoc(collection(db, "events"), {
         ...eventData,
+        host: userProfile.name,
+        hostId: userId,
         createdAt: new Date()
       });
-    } catch (e) {
-      console.error("Error adding event: ", e);
-    }
+    } catch (e) { console.error(e); }
   };
 
   // イベント 削除
   const deleteEvent = async (id) => {
     if(!window.confirm("本当に削除しますか？")) return;
-    try {
-      await deleteDoc(doc(db, "events", id));
-    } catch (e) {
-      console.error("Error deleting event: ", e);
-    }
+    try { await deleteDoc(doc(db, "events", id)); } catch (e) { console.error(e); }
   };
 
   // イベント 参加
   const handleJoinEvent = async (id) => {
     try {
       const eventRef = doc(db, "events", id);
-      await updateDoc(eventRef, {
-        joined: true
-      });
+      await updateDoc(eventRef, { joined: true }); // 簡易実装
       alert("エントリーしました！");
-    } catch (e) {
-      console.error("Error joining event: ", e);
-    }
+    } catch (e) { console.error(e); }
   };
 
-  // ロードアウト 追加 (画像アップロード対応)
+  // ロードアウト 追加
   const addLoadout = async (newLoadout) => {
     try {
       let imageUrl = null;
-      // 画像データ(Base64)がある場合、Storageにアップロード
       if (newLoadout.image && newLoadout.image.startsWith('data:image')) {
-        const imageRef = ref(storage, `loadouts/${Date.now()}_${userProfile.name}`);
+        const imageRef = ref(storage, `loadouts/${userId}_${Date.now()}`);
         await uploadString(imageRef, newLoadout.image, 'data_url');
         imageUrl = await getDownloadURL(imageRef);
       }
@@ -1188,11 +1233,13 @@ export default function App() {
       const { id, ...loadoutData } = newLoadout;
       await addDoc(collection(db, "loadouts"), {
         ...loadoutData,
-        image: imageUrl, // URLを保存
+        image: imageUrl,
+        author: userProfile.name, // 投稿者名
+        authorId: userId,
         createdAt: new Date()
       });
     } catch (e) {
-      console.error("Error adding loadout: ", e);
+      console.error(e);
       alert("投稿に失敗しました");
     }
   };
@@ -1200,14 +1247,11 @@ export default function App() {
   // ロードアウト 削除
   const deleteLoadout = async (id) => {
     if(!window.confirm("本当に削除しますか？")) return;
-    try {
-      await deleteDoc(doc(db, "loadouts", id));
-    } catch (e) {
-      console.error("Error deleting loadout: ", e);
-    }
+    try { await deleteDoc(doc(db, "loadouts", id)); } catch (e) { console.error(e); }
   };
 
-  // --- ナビゲーション定義 (変更なし) ---
+
+  // --- 4. ナビゲーション定義 ---
   const navItems = [
     { id: 'home', label: 'ホーム', icon: <Target size={18}/> },
     { id: 'matching', label: 'メンバー募集', icon: <Users size={18}/> },
@@ -1216,7 +1260,6 @@ export default function App() {
     { id: 'tournaments', label: '大会情報', icon: <Trophy size={18}/> },
   ];
 
-  // --- Render (JSX) ---
   return (
     <div className="min-h-screen bg-black text-slate-200 font-sans selection:bg-lime-400 selection:text-black flex flex-col">
       {/* Navbar */}
