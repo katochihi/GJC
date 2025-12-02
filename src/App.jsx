@@ -38,6 +38,15 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
+// ▼▼▼ ここから追加・変更 ▼▼▼
+import { db, storage } from './firebase'; // 作成したfirebase.jsを読み込み
+import { 
+  collection, addDoc, deleteDoc, doc, updateDoc, 
+  onSnapshot, query, orderBy, arrayUnion 
+} from 'firebase/firestore';
+import { ref, uploadString, getDownloadURL } from 'firebase/storage';
+// ▲▲▲ ここまで追加 ▲▲▲
+
 // --- Global Constants & Styles ---
 // 日本語表記
 const MODES = ["ランクマッチ", "バトルロイヤル", "ゾンビモード", "カジュアル"];
@@ -983,12 +992,14 @@ const LandingPage = ({ onNavigate }) => (
 
 // --- Main Layout ---
 
+// src/App.jsx の export default function App() { ... } の中身をこれに置き換え
+
 export default function App() {
   const [activeView, setActiveView] = useState('home');
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
 
-  // User Profile State
+  // ユーザープロフィール（本来は認証機能と紐づけますが、今回は簡易的にローカルステートで管理）
   const [userProfile, setUserProfile] = useState({
     name: "PlayerOne",
     rank: "レジェンド",
@@ -996,7 +1007,7 @@ export default function App() {
     gameName: "",
     parallelName: "",
     discordName: "",
-    twitterName: "" // Added field
+    twitterName: ""
   });
 
   const handleUpdateProfile = (newProfile) => {
@@ -1004,58 +1015,199 @@ export default function App() {
     setIsProfileModalOpen(false);
   };
 
-  // Data States (Empty Initial State as requested)
+  // --- Firebase データのリアルタイム取得 ---
+  
   const [recruitmentPosts, setRecruitmentPosts] = useState([]);
   const [scrimPosts, setScrimPosts] = useState([]);
   const [events, setEvents] = useState([]);
   const [loadouts, setLoadouts] = useState([]);
 
-  // Handlers
-  const addPost = (newPost) => setRecruitmentPosts([newPost, ...recruitmentPosts]);
-  const deletePost = (id) => setRecruitmentPosts(recruitmentPosts.filter(p => p.id !== id));
-  
-  // When joining, add current user profile to applicants list of that post
-  const handleJoinPost = (id) => {
-    setRecruitmentPosts(recruitmentPosts.map(p => {
-      if (p.id === id) {
-        return { 
-          ...p, 
-          joined: true,
-          applicants: [...(p.applicants || []), userProfile] // Add self to applicants
-        };
+  // 1. 募集リスト取得
+  useEffect(() => {
+    const q = query(collection(db, "recruitments"), orderBy("createdAt", "desc"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      setRecruitmentPosts(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // 2. スクリムリスト取得
+  useEffect(() => {
+    const q = query(collection(db, "scrims"), orderBy("createdAt", "desc"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      setScrimPosts(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // 3. イベントリスト取得
+  useEffect(() => {
+    const q = query(collection(db, "events"), orderBy("createdAt", "desc"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      setEvents(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // 4. ロードアウト取得
+  useEffect(() => {
+    const q = query(collection(db, "loadouts"), orderBy("createdAt", "desc"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      setLoadouts(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    });
+    return () => unsubscribe();
+  }, []);
+
+
+  // --- アクションハンドラ (Firebase書き込み) ---
+
+  // メンバー募集 追加
+  const addPost = async (newPost) => {
+    try {
+      // idはFirestoreが自動生成するので除外、日付をサーバー用に整形
+      const { id, ...postData } = newPost; 
+      await addDoc(collection(db, "recruitments"), {
+        ...postData,
+        createdAt: new Date(),
+        timestamp: new Date().toLocaleString('ja-JP', { hour: '2-digit', minute: '2-digit' }) // 表示用時刻
+      });
+    } catch (e) {
+      console.error("Error adding post: ", e);
+      alert("投稿に失敗しました");
+    }
+  };
+
+  // メンバー募集 削除
+  const deletePost = async (id) => {
+    if(!window.confirm("本当に削除しますか？")) return;
+    try {
+      await deleteDoc(doc(db, "recruitments", id));
+    } catch (e) {
+      console.error("Error deleting post: ", e);
+    }
+  };
+
+  // メンバー募集 参加
+  const handleJoinPost = async (id) => {
+    try {
+      const postRef = doc(db, "recruitments", id);
+      await updateDoc(postRef, {
+        joined: true, // 簡易的なフラグ（本来はユーザーIDで管理推奨）
+        applicants: arrayUnion(userProfile)
+      });
+      alert("参加リクエストを送信しました！");
+    } catch (e) {
+      console.error("Error joining post: ", e);
+    }
+  };
+
+  // スクリム 追加
+  const addScrim = async (newScrim) => {
+    try {
+      const { id, ...scrimData } = newScrim;
+      await addDoc(collection(db, "scrims"), {
+        ...scrimData,
+        createdAt: new Date()
+      });
+    } catch (e) {
+      console.error("Error adding scrim: ", e);
+    }
+  };
+
+  // スクリム 削除
+  const deleteScrim = async (id) => {
+    if(!window.confirm("本当に削除しますか？")) return;
+    try {
+      await deleteDoc(doc(db, "scrims", id));
+    } catch (e) {
+      console.error("Error deleting scrim: ", e);
+    }
+  };
+
+  // スクリム 応募
+  const handleApplyScrim = async (id) => {
+    try {
+      const scrimRef = doc(db, "scrims", id);
+      await updateDoc(scrimRef, {
+        applied: true,
+        applicants: arrayUnion(userProfile)
+      });
+      alert("対戦申し込みを送信しました！");
+    } catch (e) {
+      console.error("Error applying scrim: ", e);
+    }
+  };
+
+  // イベント 追加
+  const addEvent = async (newEvent) => {
+    try {
+      const { id, ...eventData } = newEvent;
+      await addDoc(collection(db, "events"), {
+        ...eventData,
+        createdAt: new Date()
+      });
+    } catch (e) {
+      console.error("Error adding event: ", e);
+    }
+  };
+
+  // イベント 削除
+  const deleteEvent = async (id) => {
+    if(!window.confirm("本当に削除しますか？")) return;
+    try {
+      await deleteDoc(doc(db, "events", id));
+    } catch (e) {
+      console.error("Error deleting event: ", e);
+    }
+  };
+
+  // イベント 参加
+  const handleJoinEvent = async (id) => {
+    try {
+      const eventRef = doc(db, "events", id);
+      await updateDoc(eventRef, {
+        joined: true
+      });
+      alert("エントリーしました！");
+    } catch (e) {
+      console.error("Error joining event: ", e);
+    }
+  };
+
+  // ロードアウト 追加 (画像アップロード対応)
+  const addLoadout = async (newLoadout) => {
+    try {
+      let imageUrl = null;
+      // 画像データ(Base64)がある場合、Storageにアップロード
+      if (newLoadout.image && newLoadout.image.startsWith('data:image')) {
+        const imageRef = ref(storage, `loadouts/${Date.now()}_${userProfile.name}`);
+        await uploadString(imageRef, newLoadout.image, 'data_url');
+        imageUrl = await getDownloadURL(imageRef);
       }
-      return p;
-    }));
-    alert("参加リクエストを送信しました！");
+
+      const { id, ...loadoutData } = newLoadout;
+      await addDoc(collection(db, "loadouts"), {
+        ...loadoutData,
+        image: imageUrl, // URLを保存
+        createdAt: new Date()
+      });
+    } catch (e) {
+      console.error("Error adding loadout: ", e);
+      alert("投稿に失敗しました");
+    }
   };
 
-  const addScrim = (newScrim) => setScrimPosts([newScrim, ...scrimPosts]);
-  const deleteScrim = (id) => setScrimPosts(scrimPosts.filter(s => s.id !== id));
-  
-  const handleApplyScrim = (id) => {
-    setScrimPosts(scrimPosts.map(s => {
-      if (s.id === id) {
-        return { 
-          ...s, 
-          applied: true,
-          applicants: [...(s.applicants || []), userProfile] // Add self to applicants
-        };
-      }
-      return s;
-    }));
-    alert("対戦申し込みを送信しました！");
+  // ロードアウト 削除
+  const deleteLoadout = async (id) => {
+    if(!window.confirm("本当に削除しますか？")) return;
+    try {
+      await deleteDoc(doc(db, "loadouts", id));
+    } catch (e) {
+      console.error("Error deleting loadout: ", e);
+    }
   };
 
-  const addEvent = (newEvent) => setEvents([...events, newEvent]);
-  const deleteEvent = (id) => setEvents(events.filter(e => e.id !== id));
-  const handleJoinEvent = (id) => {
-    setEvents(events.map(e => e.id === id ? { ...e, joined: true } : e));
-    alert("イベントへのエントリーが完了しました！");
-  };
-
-  const addLoadout = (newLoadout) => setLoadouts([newLoadout, ...loadouts]);
-  const deleteLoadout = (id) => setLoadouts(loadouts.filter(l => l.id !== id));
-
+  // --- ナビゲーション定義 (変更なし) ---
   const navItems = [
     { id: 'home', label: 'ホーム', icon: <Target size={18}/> },
     { id: 'matching', label: 'メンバー募集', icon: <Users size={18}/> },
@@ -1064,8 +1216,10 @@ export default function App() {
     { id: 'tournaments', label: '大会情報', icon: <Trophy size={18}/> },
   ];
 
+  // --- Render (JSX) ---
   return (
     <div className="min-h-screen bg-black text-slate-200 font-sans selection:bg-lime-400 selection:text-black flex flex-col">
+      {/* Navbar */}
       <nav className="sticky top-0 z-50 bg-black/80 backdrop-blur-md border-b border-slate-800 h-16">
         <div className="max-w-7xl mx-auto px-4 h-full flex items-center justify-between">
           <div onClick={() => setActiveView('home')} className="flex items-center gap-2 font-bold text-xl tracking-tighter text-white cursor-pointer hover:opacity-80 transition-opacity">
@@ -1098,6 +1252,7 @@ export default function App() {
         </div>
       </nav>
 
+      {/* Mobile Menu */}
       <AnimatePresence>
         {isMenuOpen && (
           <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="md:hidden bg-slate-900 border-b border-slate-800 overflow-hidden">
@@ -1114,6 +1269,7 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      {/* Main Content */}
       <main className="flex-1 relative overflow-x-hidden">
         <AnimatePresence mode="wait">
           <motion.div key={activeView} initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} transition={{ duration: 0.2 }} className="min-h-full">
@@ -1126,6 +1282,7 @@ export default function App() {
         </AnimatePresence>
       </main>
 
+      {/* Profile Modal */}
       <AnimatePresence>
         {isProfileModalOpen && <ProfileModal profile={userProfile} onClose={() => setIsProfileModalOpen(false)} onSave={handleUpdateProfile} />}
       </AnimatePresence>
